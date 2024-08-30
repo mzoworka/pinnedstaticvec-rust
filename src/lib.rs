@@ -168,6 +168,44 @@ where
     }
 }
 
+pub struct SelectVecAndFut<'a, T, const N: usize, F>(pub &'a mut PinnedStaticVec<T, N>, pub F);
+impl<'a, T, const N: usize, F> core::future::Future for SelectVecAndFut<'a, T, N, F>
+where
+    T: core::future::Future,
+    F: core::future::Future + Unpin,
+{
+    type Output = either::Either<F::Output, T::Output>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let self_mut = self.get_mut();
+
+        let pin = core::pin::pin!(&mut self_mut.1);
+        match core::future::Future::poll(pin, cx) {
+            core::task::Poll::Ready(x) => return core::task::Poll::Ready(either::Left(x)),
+            core::task::Poll::Pending => {}
+        };
+
+        for i in 0..N {
+            let fut = self_mut.0.get_mut(i);
+            if let Ok(Some(fut)) = fut {
+                let pin = unsafe { core::pin::Pin::new_unchecked(fut) };
+                match core::future::Future::poll(pin, cx) {
+                    core::task::Poll::Ready(x) => {
+                        unsafe { self_mut.0.remove_unsafe(i) };
+                        return core::task::Poll::Ready(either::Right(x));
+                    }
+                    core::task::Poll::Pending => {}
+                }
+            }
+        }
+
+        core::task::Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
