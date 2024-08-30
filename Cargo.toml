@@ -1,5 +1,5 @@
 [package]
-name = "simplestaticvec"
+name = "pinnedstaticvec"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 either = { version = "1.10.*" }
+
+[dev-dependencies]
+tokio = { version = "1.39.*", features = ["full"] }

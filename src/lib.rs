@@ -1,45 +1,34 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![allow(incomplete_features)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(generic_const_exprs)]
 #![feature(generic_arg_infer)]
+#![feature(fn_traits)]
 
-use core::mem::MaybeUninit;
-use core::{ptr, slice};
-
-use either::Either;
+use core::slice;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub enum StaticVecError {
+pub enum PinnedStaticVecError {
     CapacityExceeded,
 }
 
 #[derive(Debug)]
-pub struct StaticVec<T, const N: usize> {
+pub struct PinnedStaticVec<T, const N: usize> {
     len: usize,
-    data: [MaybeUninit<T>; N],
+    data: [Option<T>; N],
 }
 
-fn extend_array<T, const A: usize, const N: usize>(a: [T; A]) -> [MaybeUninit<T>; N]
-where
-    T: Clone,
-    [(); N]:,
-    [(); N - A]:,
-{
-    let mut ary = MaybeUninit::uninit_array();
-    for (idx, val) in a.into_iter().enumerate() {
-        ary[idx] = MaybeUninit::new(val);
-    }
-    ary
+const fn const_none<T>(_i: usize) -> Option<T> {
+    Option::None
 }
 
-impl<T, const N: usize> StaticVec<T, N> {
-    pub fn new(len: usize) -> Result<Self, StaticVecError> {
+impl<T, const N: usize> PinnedStaticVec<T, N> {
+    pub fn new(len: usize) -> Result<Self, PinnedStaticVecError> {
         if len > N {
-            return Err(StaticVecError::CapacityExceeded);
+            return Err(PinnedStaticVecError::CapacityExceeded);
         }
         Ok(Self {
-            data: MaybeUninit::uninit_array(),
+            data: core::array::from_fn(const_none),
             len,
         })
     }
@@ -57,125 +46,46 @@ impl<T, const N: usize> StaticVec<T, N> {
         unsafe { core::mem::transmute::<_, &[T]>(&self.data[..self.len]) }
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        //safe as we ensure that 0..len elements are initialized
-        unsafe { core::mem::transmute::<_, &mut [T]>(&mut self.data[..self.len]) }
-    }
-
     pub fn iter(&self) -> slice::Iter<'_, T> {
         //safe as we ensure that 0..len elements are initialized
         unsafe { core::mem::transmute::<_, core::slice::Iter<'_, T>>(self.data[..self.len].iter()) }
     }
 
-    pub fn iter_mut(&mut self) -> slice::IterMut<'_, T> {
-        //safe as we ensure that 0..len elements are initialized
-        unsafe {
-            core::mem::transmute::<_, core::slice::IterMut<'_, T>>(self.data[..self.len].iter_mut())
+    fn find_slot(&self) -> Option<usize> {
+        if self.len >= N {
+            return None;
         }
+
+        (0..N).find(|&i| self.data[i].is_none())
     }
 
-    fn resize(&mut self, new_len: usize) -> Result<(), StaticVecError> {
-        if new_len > N {
-            return Err(StaticVecError::CapacityExceeded);
-        }
-        self.len = new_len;
-        Ok(())
-    }
-
-    pub fn push(&mut self, item: T) -> Result<(), StaticVecError> {
-        let old_len = self.len();
-        self.resize(old_len + 1)?;
-        self.as_mut_slice()[old_len] = item;
-        Ok(())
-    }
-
-    pub fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), StaticVecError>
-    where
-        T: Copy,
-    {
-        let old_len = self.len();
-        self.resize(old_len + other.len())?;
-        self.as_mut_slice()[old_len..].copy_from_slice(other);
-        Ok(())
-    }
-
-    pub fn try_extend_from_iter<I: Iterator<Item = T>>(
-        &mut self,
-        iter: I,
-    ) -> Result<(), StaticVecError> {
-        for it in iter {
-            let last_item = self.len();
-            self.resize(last_item + 1)?;
-            unsafe {
-                *self.data.get_unchecked_mut(last_item) = MaybeUninit::new(it);
+    pub fn push(&mut self, item: T) -> Result<(), (PinnedStaticVecError, T)> {
+        match self.find_slot() {
+            Some(slot) => {
+                self.data[slot] = Some(item);
+                self.len += 1;
+                Ok(())
             }
+            None => Err((PinnedStaticVecError::CapacityExceeded, item)),
         }
-        Ok(())
     }
 
-    pub fn try_extend_from_iter_ref<'a, I: Iterator<Item = &'a T>>(
-        &mut self,
-        iter: I,
-    ) -> Result<(), StaticVecError>
-    where
-        T: 'a + Clone,
-    {
-        self.try_extend_from_iter(iter.cloned())
+    fn get_mut(&mut self, index: usize) -> Result<&mut Option<T>, PinnedStaticVecError> {
+        if index >= N {
+            return Err(PinnedStaticVecError::CapacityExceeded);
+        }
+        Ok(unsafe { self.data.get_unchecked_mut(index) })
     }
 
-    pub fn from_array<const A: usize>(value: [T; A]) -> Self
-    where
-        T: Clone,
-        [(); N - A]:,
-    {
-        let mut x: Self = extend_array(value).into();
-        x.resize(A).unwrap();
-        x
-    }
-
-    pub fn remove(&mut self, index: usize) -> T {
-        let len = self.len;
-
-        assert!(len > 0);
-        assert!(index < len);
-
-        unsafe {
-            // infallible
-            let ret;
-            {
-                // the place we are taking from.
-                let ptr = self.as_mut_ptr().add(index);
-                // copy it out, unsafely having a copy of the value on
-                // the stack and in the vector at the same time.
-                ret = ptr::read(ptr);
-
-                // Shift everything down to fill in that spot.
-                ptr::copy(ptr.add(1), ptr, len - index - 1);
-            }
+    unsafe fn remove_unsafe(&mut self, index: usize) {
+        if self.data[index].is_some() {
             self.len -= 1;
-            ret
         }
+        self.data[index] = None;
     }
 }
 
-impl<T, const N: usize> Clone for StaticVec<T, N>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Self {
-        let src = self.as_slice();
-        let mut data = MaybeUninit::uninit_array();
-        for i in 0..src.len() {
-            data[i] = MaybeUninit::new(src[i].clone());
-        }
-        Self {
-            len: self.len,
-            data,
-        }
-    }
-}
-
-impl<T, const N: usize> PartialEq for StaticVec<T, N>
+impl<T, const N: usize> PartialEq for PinnedStaticVec<T, N>
 where
     T: PartialEq,
 {
@@ -187,7 +97,7 @@ where
     }
 }
 
-impl<'a, T, const N: usize> IntoIterator for &'a StaticVec<T, N> {
+impl<'a, T, const N: usize> IntoIterator for &'a PinnedStaticVec<T, N> {
     type Item = &'a T;
 
     type IntoIter = slice::Iter<'a, T>;
@@ -197,43 +107,16 @@ impl<'a, T, const N: usize> IntoIterator for &'a StaticVec<T, N> {
     }
 }
 
-impl<T, const N: usize> Default for StaticVec<T, N> {
+impl<T, const N: usize> Default for PinnedStaticVec<T, N> {
     fn default() -> Self {
         Self {
             len: 0,
-            data: MaybeUninit::uninit_array(),
+            data: core::array::from_fn(const_none),
         }
     }
 }
 
-impl<'a, T: Clone, const N: usize> From<&'a [T; N]> for StaticVec<T, N> {
-    fn from(value: &'a [T; N]) -> Self {
-        Self {
-            data: value.clone().map(|x| MaybeUninit::new(x)),
-            len: N,
-        }
-    }
-}
-
-impl<T, const N: usize> From<[T; N]> for StaticVec<T, N> {
-    fn from(value: [T; N]) -> Self {
-        Self {
-            data: value.map(|x| MaybeUninit::new(x)),
-            len: N,
-        }
-    }
-}
-
-impl<T, const N: usize> From<[MaybeUninit<T>; N]> for StaticVec<T, N> {
-    fn from(value: [MaybeUninit<T>; N]) -> Self {
-        Self {
-            data: value.map(|x| x),
-            len: N,
-        }
-    }
-}
-
-impl<T, const N: usize> core::ops::Deref for StaticVec<T, N> {
+impl<T, const N: usize> core::ops::Deref for PinnedStaticVec<T, N> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
@@ -241,13 +124,7 @@ impl<T, const N: usize> core::ops::Deref for StaticVec<T, N> {
     }
 }
 
-impl<T, const N: usize> core::ops::DerefMut for StaticVec<T, N> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut_slice()
-    }
-}
-
-impl<T, const N: usize> core::ops::Index<usize> for StaticVec<T, N> {
+impl<T, const N: usize> core::ops::Index<usize> for PinnedStaticVec<T, N> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -255,64 +132,157 @@ impl<T, const N: usize> core::ops::Index<usize> for StaticVec<T, N> {
     }
 }
 
-pub struct SelectVec<'a, T, const N: usize>(pub &'a mut StaticVec<T, N>);
+pub struct SelectVec<'a, T, const N: usize>(pub &'a mut PinnedStaticVec<T, N>);
 impl<'a, T, const N: usize> core::future::Future for SelectVec<'a, T, N>
 where
-    T: core::future::Future + core::marker::Unpin,
+    T: core::future::Future,
 {
-    type Output = T::Output;
+    type Output = Option<T::Output>;
 
     fn poll(
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
         let self_mut = self.get_mut();
-        for i in 0..self_mut.0.len() {
-            let fut = unsafe { self_mut.0.get_unchecked_mut(i) };
-            let pin = core::pin::pin!(fut);
-            match core::future::Future::poll(pin, cx) {
-                core::task::Poll::Ready(x) => {
-                    self_mut.0.remove(i);
-                    return core::task::Poll::Ready(x);
+        let mut found = false;
+        for i in 0..N {
+            let fut = self_mut.0.get_mut(i);
+            if let Ok(Some(fut)) = fut {
+                found = true;
+                let pin = unsafe { core::pin::Pin::new_unchecked(fut) };
+                match core::future::Future::poll(pin, cx) {
+                    core::task::Poll::Ready(x) => {
+                        unsafe { self_mut.0.remove_unsafe(i) };
+                        return core::task::Poll::Ready(Some(x));
+                    }
+                    core::task::Poll::Pending => {}
                 }
-                core::task::Poll::Pending => {}
             }
+        }
+
+        if !found {
+            return core::task::Poll::Ready(None);
         }
 
         core::task::Poll::Pending
     }
 }
 
-pub struct SelectVecAndFut<'a, T, F, const N: usize>(pub &'a mut StaticVec<T, N>, pub F);
-impl<'a, T, F, const N: usize> core::future::Future for SelectVecAndFut<'a, T, F, N>
-where
-    T: core::future::Future + core::marker::Unpin,
-    F: core::future::Future + core::marker::Unpin,
-{
-    type Output = Either<F::Output, T::Output>;
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
 
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        let self_mut = self.get_mut();
-        let pin = core::pin::pin!(&mut self_mut.1);
-        match core::future::Future::poll(pin, cx) {
-            core::task::Poll::Ready(x) => return core::task::Poll::Ready(either::Left(x)),
-            core::task::Poll::Pending => {}
-        };
-        for i in 0..self_mut.0.len() {
-            let fut = unsafe { self_mut.0.get_unchecked_mut(i) };
-            let pin = core::pin::pin!(fut);
-            match core::future::Future::poll(pin, cx) {
-                core::task::Poll::Ready(x) => {
-                    self_mut.0.remove(i);
-                    return core::task::Poll::Ready(either::Right(x));
-                }
-                core::task::Poll::Pending => {}
-            }
+    use crate::{PinnedStaticVec, SelectVec};
+
+    async fn coro(id: i8, common: &str) -> Result<i32, &str> {
+        println!("coro{id}: start");
+        let mut j = 0;
+        for i in 1..5 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            j = j + i;
+            println!("coro{id}({common}): {i}");
         }
+        println!("coro{id}: end");
+        Ok(j)
+    }
 
-        core::task::Poll::Pending
+    #[tokio::test]
+    async fn test_single_coro() -> Result<(), &'static str> {
+        println!("start test");
+        let mut v = PinnedStaticVec::<_, 4>::default();
+        let coro = coro(1, "hello");
+
+        assert_eq!(v.push(coro).ok(), Some(()));
+        assert_eq!(v.len(), 1);
+
+        println!("await SelectVec");
+        SelectVec(&mut v).await;
+
+        assert_eq!(v.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_single_coro_timeout() -> Result<(), &'static str> {
+        println!("start test");
+        let mut v = PinnedStaticVec::<_, 4>::default();
+        let coro = coro(1, "hello");
+
+        let timeout_coro = tokio::time::timeout(Duration::from_secs(2), coro);
+
+        assert_eq!(v.push(timeout_coro).ok(), Some(()));
+        assert_eq!(v.len(), 1);
+
+        println!("await SelectVec");
+        SelectVec(&mut v).await;
+
+        assert_eq!(v.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_four_coros() -> Result<(), &'static str> {
+        println!("start test");
+        let mut v = PinnedStaticVec::<_, 4>::default();
+        let common = "hello";
+        let coro1 = coro(1, common);
+        let coro2 = coro(2, common);
+        let coro3 = coro(3, common);
+        let coro4 = coro(4, common);
+
+        let timeout_coro1 = tokio::time::timeout(Duration::from_secs(6), coro1);
+        let timeout_coro2 = tokio::time::timeout(Duration::from_secs(6), coro2);
+        let timeout_coro3 = tokio::time::timeout(Duration::from_secs(2), coro3);
+        let timeout_coro4 = tokio::time::timeout(Duration::from_secs(2), coro4);
+        assert_eq!(v.push(timeout_coro1).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro2).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro3).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro4).ok(), Some(()));
+
+        assert_eq!(v.len(), 4);
+
+        println!("await SelectVec");
+        SelectVec(&mut v).await;
+
+        assert!(v.len() < 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_overflow() -> Result<(), &'static str> {
+        println!("start test");
+        let mut v = PinnedStaticVec::<_, 4>::default();
+        let common = "hello";
+        let coro1 = coro(1, common);
+        let coro2 = coro(2, common);
+        let coro3 = coro(3, common);
+        let coro4 = coro(4, common);
+        let coro5 = coro(5, common);
+
+        let timeout_coro1 = tokio::time::timeout(Duration::from_secs(6), coro1);
+        let timeout_coro2 = tokio::time::timeout(Duration::from_secs(6), coro2);
+        let timeout_coro3 = tokio::time::timeout(Duration::from_secs(2), coro3);
+        let timeout_coro4 = tokio::time::timeout(Duration::from_secs(2), coro4);
+        let timeout_coro5 = tokio::time::timeout(Duration::from_secs(2), coro5);
+        assert_eq!(v.push(timeout_coro1).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro2).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro3).ok(), Some(()));
+        assert_eq!(v.push(timeout_coro4).ok(), Some(()));
+        assert_eq!(
+            v.push(timeout_coro5).err().map(|e| e.0),
+            Some(crate::PinnedStaticVecError::CapacityExceeded)
+        );
+
+        assert_eq!(v.len(), 4);
+
+        println!("await SelectVec");
+        SelectVec(&mut v).await;
+
+        assert!(v.len() < 4);
+
+        Ok(())
     }
 }
