@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), no_std)]
 #![allow(incomplete_features)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(generic_const_exprs)]
 #![feature(generic_arg_infer)]
 #![feature(fn_traits)]
