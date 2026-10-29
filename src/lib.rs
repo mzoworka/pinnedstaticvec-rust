@@ -1,8 +1,4 @@
 #![cfg_attr(not(test), no_std)]
-#![allow(incomplete_features)]
-#![feature(generic_const_exprs)]
-#![feature(fn_traits)]
-
 use core::slice;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -40,13 +36,17 @@ impl<T, const N: usize> PinnedStaticVec<T, N> {
     }
 
     pub fn as_slice(&self) -> &[T] {
-        //safe as we ensure that 0..len elements are initialized
-        unsafe { core::mem::transmute::<_, &[T]>(&self.data[..self.len]) }
+        #[allow(unsafe_code)] //safe as we ensure that 0..len elements are initialized
+        unsafe {
+            core::mem::transmute::<_, &[T]>(&self.data[..self.len])
+        }
     }
 
     pub fn iter(&self) -> slice::Iter<'_, T> {
-        //safe as we ensure that 0..len elements are initialized
-        unsafe { core::mem::transmute::<_, core::slice::Iter<'_, T>>(self.data[..self.len].iter()) }
+        #[allow(unsafe_code)] //safe as we ensure that 0..len elements are initialized
+        unsafe {
+            core::mem::transmute::<_, core::slice::Iter<'_, T>>(self.data[..self.len].iter())
+        }
     }
 
     fn find_slot(&self) -> Option<usize> {
@@ -72,9 +72,11 @@ impl<T, const N: usize> PinnedStaticVec<T, N> {
         if index >= N {
             return Err(PinnedStaticVecError::CapacityExceeded);
         }
+        #[allow(unsafe_code)] //safe as we ensure that array has N elements, and index is in range
         Ok(unsafe { self.data.get_unchecked_mut(index) })
     }
 
+    #[allow(unsafe_code)] //need to ensure that the item is no longer used
     unsafe fn remove_unsafe(&mut self, index: usize) {
         if self.data[index].is_some() {
             self.len -= 1;
@@ -147,10 +149,16 @@ where
             let fut = self_mut.0.get_mut(i);
             if let Ok(Some(fut)) = fut {
                 found = true;
+                #[allow(unsafe_code)]
+                //safe as we promise that the item will not move, at least until it will be ready
                 let pin = unsafe { core::pin::Pin::new_unchecked(fut) };
                 match core::future::Future::poll(pin, cx) {
                     core::task::Poll::Ready(x) => {
-                        unsafe { self_mut.0.remove_unsafe(i) };
+                        #[allow(unsafe_code)]
+                        //safe as the item is ready, we will never poll it again
+                        unsafe {
+                            self_mut.0.remove_unsafe(i)
+                        };
                         return core::task::Poll::Ready(Some(x));
                     }
                     core::task::Poll::Pending => {}
@@ -189,10 +197,16 @@ where
         for i in 0..N {
             let fut = self_mut.0.get_mut(i);
             if let Ok(Some(fut)) = fut {
+                #[allow(unsafe_code)]
+                //safe as we promise that the item will not move, at least until it will be ready
                 let pin = unsafe { core::pin::Pin::new_unchecked(fut) };
                 match core::future::Future::poll(pin, cx) {
                     core::task::Poll::Ready(x) => {
-                        unsafe { self_mut.0.remove_unsafe(i) };
+                        #[allow(unsafe_code)]
+                        //safe as the item is ready, we will never poll it again
+                        unsafe {
+                            self_mut.0.remove_unsafe(i)
+                        };
                         return core::task::Poll::Ready(either::Right(x));
                     }
                     core::task::Poll::Pending => {}
@@ -215,7 +229,7 @@ mod tests {
         let mut j = 0;
         for i in 1..5 {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            j = j + i;
+            j += i;
             println!("coro{id}({common}): {i}");
         }
         println!("coro{id}: end");

@@ -1,7 +1,8 @@
 [package]
 name = "pinnedstaticvec"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,3 +11,18 @@ either = { version = "1.15.0" }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+enum_glob_use = "deny"
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+module_name_repetitions = "allow"
+unreadable_literal = "allow"
+
+
+
